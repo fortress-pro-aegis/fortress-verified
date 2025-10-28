@@ -1,0 +1,124 @@
+# Fortress CI/CD — Private Build Pipeline
+# License: NOT open-source. Internal use only.
+# Email Support: official@thefortressapp.pro
+# NGINX reverse proxy + Flask backend (Socket.IO + Eventlet)
+# Cloudflare DNS + Email Routing — configured externally
+
+name: build
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  actions: write
+  security-events: write
+  pull-requests: write
+  issues: write
+  deployments: write
+  statuses: write
+  checks: write
+  repository-projects: write
+
+jobs:
+  compile:
+    name: Compile Fortress Systems
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Nim
+        uses: iffy/install-nim@v4
+
+      - name: Install Deps (Python/Node)
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install flask flask-socketio eventlet fastapi reportlab openai google-generativeai huggingface_hub
+          npm install --global typescript
+
+      - name: Install Vim Plugin Deps
+        run: |
+          mkdir -p ~/.vim/pack/vendor/start
+          git clone https://github.com/preservim/nerdtree ~/.vim/pack/vendor/start/nerdtree
+
+      - name: Set API Keys for External Models
+        run: |
+          echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> $GITHUB_ENV
+          echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
+          echo "HUGGINGFACE_TOKEN=${{ secrets.HUGGINGFACE_TOKEN }}" >> $GITHUB_ENV
+          echo "META_ACCESS_TOKEN=${{ secrets.META_ACCESS_TOKEN }}" >> $GITHUB_ENV
+
+      - name: Hash PDF
+        run: |
+          python3 ci/pdf_hash.py
+
+      - name: Build Fortress Daemon (Go)
+        run: |
+          cd fortress-daemon
+          go mod tidy
+          go build -o fortressd main.go
+
+      - name: Compile Nim CLI
+        run: |
+          cd fortress-cli
+          nimble install -y
+          nim c -d:release cli.nim
+
+      - name: Run Tests
+        run: |
+          go test ./...
+          python3 -m unittest discover tests
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0.15.4
+        with:
+          path: ./
+          format: spdx-json
+
+      - name: Init CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: go, python, javascript
+
+      - name: Clear CodeQL Sharif Language Error
+        run: |
+          rm -f /opt/hostedtoolcache/CodeQL/*/x64/codeql/tools/sharif.sh || true
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ./
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortress-artifacts
+          path: |
+            fortress-daemon/fortressd
+            fortress-cli/cli
+            reports/hash.txt
+            sbom.spdx.json
